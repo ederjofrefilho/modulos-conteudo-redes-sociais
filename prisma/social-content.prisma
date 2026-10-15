@@ -1,0 +1,340 @@
+// Modelos e enums dos módulos @app/content e @app/social.
+// Copiados VERBATIM de packages/db/prisma/schema.prisma do sistema original.
+// Dependem dos modelos do host descritos em host-required.prisma (User),
+// e o código dos módulos usa ainda Event, Notification e RateLimit pelo core.
+// Ver docs/04-MODELO-DE-DADOS.md.
+
+// ---------------------------------------------------------------------------
+// CONTEÚDO — blog e casos de sucesso, geridos aqui (decisão de 13/08/2026,
+// ver CLAUDE.md princípio 6). O site institucional (site institucional) só lê, via a
+// API pública de conteúdo (Fase D) — nunca escreve aqui e não define modelo.
+//
+// Caso de sucesso é uma postagem de blog de outro tipo, não um registro
+// comercial: por isso um modelo só (ContentPost.kind), sem accountId/dealId.
+// ---------------------------------------------------------------------------
+enum ContentKind {
+  ARTICLE
+  CASE
+}
+
+enum ContentStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  ARCHIVED
+}
+
+model ContentPost {
+  id     String        @id @default(cuid())
+  kind   ContentKind
+  status ContentStatus @default(DRAFT)
+  // Único INDEPENDENTE do kind — artigo e caso de sucesso compartilham o
+  // mesmo espaço de slugs porque o site os serve sob rotas irmãs
+  // (/blog/[slug] e /casos/[slug]), e permitir colisão entre os dois só
+  // adiaria o erro para a hora de gerar link.
+  slug   String        @unique
+
+  title          String
+  excerpt        String
+  seoTitle       String?
+  seoDescription String
+  category       String
+  accent         String
+
+  // Corpo = prosa contínua + blocos inseridos (modules/content/src/blocks.ts
+  // valida a forma). blocksVersion existe para o dia em que a união mudar de
+  // forma e a API de leitura (Fase D) precisar discordar do que já está
+  // gravado por um deploy.
+  blocks        Json
+  blocksVersion Int  @default(1)
+
+  coverAssetId String?
+  coverAsset   ContentAsset? @relation("ContentPostCover", fields: [coverAssetId], references: [id], onDelete: SetNull)
+
+  // CTA de fim de post (o par diagnosticHeadline/diagnosticDescription que
+  // o site já usa hoje em src/lib/articles.ts).
+  ctaHeadline    String?
+  ctaDescription String?
+
+  // Só preenchidos em kind: CASE — e são de EXIBIÇÃO, não de vínculo. Nada de
+  // accountId/dealId (decidido em 13/08/2026: postagem, não registro comercial).
+  clienteExibicao  String?
+  setor            String?
+  // Publicar nome de cliente real sem autorização é o tipo de erro que um
+  // unpublish não desfaz — publishPost recusa quando clienteExibicao está
+  // preenchido e este campo está false (ver modules/content/src/posts.ts).
+  clienteAutorizou Boolean @default(false)
+
+  publishedAt      DateTime?
+  // Data que o JSON-LD do site usa como dateModified — distinta de updatedAt
+  // (que também muda em campos administrativos que não são conteúdo em si).
+  contentUpdatedAt DateTime  @default(now())
+
+  // Só relevante em status: SCHEDULED. schedulePost já roda as mesmas 5
+  // validações de publishPost no momento de agendar (não só quando o cron
+  // dispara) — ver modules/content/src/posts.ts.
+  scheduledAt DateTime?
+
+  // Marca o `contentUpdatedAt` que estava vigente da ÚLTIMA VEZ que este post
+  // foi de fato empurrado pro ar (publishPost). Editar um post PUBLISHED não
+  // revalida mais a cada save (só acumula em contentUpdatedAt) — comparar os
+  // dois é como a UI mostra "alterações não publicadas" e decide se o botão
+  // é "Publicar"/"Atualizar publicação" ou já está em dia.
+  publishedContentUpdatedAt DateTime?
+
+  authorId String
+  author   User   @relation("ContentAuthor", fields: [authorId], references: [id])
+
+  // Divulgação: posts de rede social que nasceram deste artigo.
+  socialPosts SocialPost[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([kind, status])
+  @@index([status, publishedAt])
+  @@index([status, scheduledAt])
+  @@index([authorId])
+}
+
+// Imagens enviadas para posts. width/height gravados no upload (não
+// recalculados depois) — é o que permite ao site renderizar com next/image
+// sem layout shift sem precisar baixar a imagem primeiro.
+model ContentAsset {
+  id         String @id @default(cuid())
+  url        String
+  pathname   String
+  width      Int
+  height     Int
+  // Obrigatório desde o upload (Fase B) — pedir depois de publicado significa
+  // nunca pedir. publishPost recusa qualquer bloco `image` cujo asset tenha
+  // alt vazio.
+  alt        String
+  bytes      Int
+  // image/* ou video/mp4 (`@app/content/media`). Vídeo (14/10/2026) é feito
+  // fora do CRM e só enviado para publicar nas redes; nunca entra no blog.
+  mimeType   String
+  // Duração do vídeo, medida no navegador no envio. Null em imagem.
+  durationMs Int?
+
+  uploadedById String
+  uploadedBy   User   @relation("ContentAssetUploader", fields: [uploadedById], references: [id])
+
+  coverOf ContentPost[] @relation("ContentPostCover")
+
+  createdAt DateTime @default(now())
+
+  @@index([uploadedById])
+}
+
+enum SocialProvider {
+  LINKEDIN
+  INSTAGRAM
+}
+
+enum SocialAccountKind {
+  PERSON // perfil pessoal (LinkedIn: urn:li:person)
+  ORGANIZATION // página de empresa (LinkedIn: urn:li:organization) / conta profissional
+}
+
+// Acesso de um utilizador a uma conta PARTILHADA (níveis cumulativos):
+// VIEW vê os posts, DRAFT também cria rascunhos e envia para aprovação,
+// PUBLISH também aprova, agenda e publica. Métricas são um direito à parte
+// (`SocialAccountAccess.canViewMetrics`). Sem linha = sem acesso. ADMIN e o
+// dono de uma conta pessoal têm tudo, sem linha.
+enum SocialAccessLevel {
+  VIEW
+  DRAFT
+  PUBLISH
+}
+
+enum SocialPostStatus {
+  DRAFT // editável; só um humano, na tela /social, aprova
+  APPROVED // aprovado; o cron publica quando scheduledAt vence (nulo = já)
+  PUBLISHING // reservado por um publicador (lock otimista) — em voo
+  PUBLISHED
+  FAILED // a publicação falhou; "Tentar de novo" volta para APPROVED
+  ARCHIVED
+}
+
+// Uma conta conectada numa rede. Tokens sempre cifrados (packages/core/src/
+// crypto.ts) com AAD "<provider>:<externalId>" — nunca em texto puro, log,
+// Event.payload ou resposta de tool MCP. Desconectar apaga os tokens.
+model SocialAccount {
+  id               String            @id @default(cuid())
+  provider         SocialProvider
+  kind             SocialAccountKind @default(PERSON)
+  // Id do autor na rede (LinkedIn: o `sub` do OpenID / id da organização; Instagram: ig-user-id).
+  externalId       String
+  displayName      String
+  avatarUrl        String?
+  tokenEnc         String?
+  refreshTokenEnc  String?
+  tokenExpiresAt   DateTime?
+  scopes           String[]
+  connectedById    String?
+  connectedBy      User?             @relation("SocialAccountConnector", fields: [connectedById], references: [id], onDelete: SetNull)
+  // Conta da organização (página/Instagram da empresa): usada por quem um ADMIN
+  // der acesso. Pessoal (`shared = false`): só o dono (`ownerId`) e ADMIN.
+  // Dono apagado deixa a conta órfã (só ADMIN), nunca a torna partilhada.
+  shared           Boolean           @default(false)
+  ownerId          String?
+  owner            User?             @relation("SocialAccountOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  // Aviso de token a vencer já enviado no sino (um por validade).
+  expiryNotifiedAt DateTime?
+  isActive         Boolean           @default(true)
+  lastError        String?
+  // Recolha de métricas (seguidores): quando correu e o último erro legível.
+  metricsAt        DateTime?
+  metricsError     String?
+  // Importar os posts publicados fora do CRM (histórico). Ligado por conta.
+  importPosts      Boolean           @default(false)
+  importedAt       DateTime?
+  importError      String?
+
+  posts   SocialPost[]
+  metrics SocialAccountMetric[]
+  access  SocialAccountAccess[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider, externalId])
+  @@index([ownerId])
+}
+
+model SocialAccountAccess {
+  id              String            @id @default(cuid())
+  socialAccountId String
+  socialAccount   SocialAccount     @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User              @relation("SocialAccessUser", fields: [userId], references: [id], onDelete: Cascade)
+  level           SocialAccessLevel
+  canViewMetrics  Boolean           @default(false)
+  grantedById     String?
+  grantedBy       User?             @relation("SocialAccessGrantor", fields: [grantedById], references: [id], onDelete: SetNull)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@unique([socialAccountId, userId])
+  @@index([userId])
+}
+
+// Uma publicação num destino (uma conta). Variações da mesma ideia em redes
+// diferentes são linhas diferentes ligadas por `campaignKey`.
+model SocialPost {
+  id              String           @id @default(cuid())
+  socialAccountId String
+  socialAccount   SocialAccount    @relation(fields: [socialAccountId], references: [id], onDelete: Restrict)
+  text            String           @default("")
+  // Ids de ContentAsset, na ordem do carrossel. Sem FK (array): o serviço
+  // confere que existem ao gravar e de novo ao publicar.
+  mediaAssetIds   String[]
+  linkUrl         String?
+  status          SocialPostStatus @default(DRAFT)
+  scheduledAt     DateTime?
+
+  approvedById String?
+  approvedBy   User?     @relation("SocialPostApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedAt   DateTime?
+
+  publishedAt   DateTime?
+  // Id do post na rede. Preenchido = já foi ao ar: nunca publica de novo.
+  externalId    String?
+  externalUrl   String?
+  // Estado intermediário do fornecedor (ex.: containers do Instagram) para
+  // retomar sem duplicar. Nunca guarda segredo.
+  providerState Json?
+  attempts      Int       @default(0)
+  lastError     String?
+
+  sourceContentPostId String?
+  sourceContentPost   ContentPost? @relation(fields: [sourceContentPostId], references: [id], onDelete: SetNull)
+  campaignKey         String?
+
+  // Tema/tag interna (ex.: "Power BI", "Caso de sucesso") — filtro e análise.
+  topic     String?
+  // Ideia: um DRAFT ainda sem texto final. Não pode ser aprovado enquanto for ideia.
+  isIdea    Boolean @default(false)
+  // Acrescenta utm_* ao link na hora de publicar (utm_content = id do post).
+  // Nasce desligado para não mudar o link de posts criados antes disto.
+  utmAuto   Boolean @default(false)
+  // crm = criado aqui; imported = publicado fora do CRM, trazido para o histórico.
+  origin    String  @default("crm")
+  // Onde sai no Instagram: feed (imagem/carrossel), reel (vídeo) ou story
+  // (24 h, sem legenda). No LinkedIn é sempre feed. Ver rules.ts.
+  placement String  @default("feed")
+
+  // Último snapshot de métricas (mesmas chaves de SocialPostMetric), para
+  // ordenar e listar sem juntar a tabela de histórico.
+  metrics         Json?
+  metricsAt       DateTime?
+  metricsError    String?
+  metricSnapshots SocialPostMetric[]
+
+  createdById String
+  createdBy   User   @relation("SocialPostAuthor", fields: [createdById], references: [id])
+
+  // Revisão de quem só pode criar rascunhos: null | "pending" (à espera de
+  // quem pode publicar) | "returned" (devolvido com comentário).
+  reviewState   String?
+  submittedById String?
+  submittedBy   User?     @relation("SocialPostSubmitter", fields: [submittedById], references: [id], onDelete: SetNull)
+  submittedAt   DateTime?
+  reviewedById  String?
+  reviewedBy    User?     @relation("SocialPostReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt    DateTime?
+  reviewComment String?
+  // Quem pôs o horário e quem publicou (o cron publica em nome de quem aprovou).
+  scheduledById String?
+  scheduledBy   User?     @relation("SocialPostScheduler", fields: [scheduledById], references: [id], onDelete: SetNull)
+  publishedById String?
+  publishedBy   User?     @relation("SocialPostPublisher", fields: [publishedById], references: [id], onDelete: SetNull)
+  // A publicação como está na rede (sincronização): tipo e media com cópia
+  // no Blob do CRM (as URLs do Instagram expiram). Ver modules/social/src/sync.
+  remote        Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, scheduledAt])
+  @@index([socialAccountId, status])
+  @@index([sourceContentPostId])
+  @@index([campaignKey])
+  @@index([status, publishedAt])
+}
+
+// Histórico próprio de métricas: uma linha por recolha de um post publicado.
+// Valores são TOTAIS acumulados na rede naquele instante (não deltas); nulo =
+// a API não deu essa métrica (rede não tem, ou falta permissão).
+model SocialPostMetric {
+  id           String     @id @default(cuid())
+  socialPostId String
+  socialPost   SocialPost @relation(fields: [socialPostId], references: [id], onDelete: Cascade)
+  capturedAt   DateTime   @default(now())
+  impressions  Int?
+  reach        Int?
+  reactions    Int?
+  comments     Int?
+  shares       Int?
+  saves        Int?
+  clicks       Int?
+  videoViews   Int?
+  // Resposta crua da API (sem token), para auditar e reprocessar.
+  raw          Json?
+
+  @@index([socialPostId, capturedAt])
+  @@index([capturedAt])
+}
+
+// Seguidores da conta ao longo do tempo (uma linha por recolha, ~1 por dia).
+model SocialAccountMetric {
+  id              String        @id @default(cuid())
+  socialAccountId String
+  socialAccount   SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  capturedAt      DateTime      @default(now())
+  followers       Int?
+  raw             Json?
+
+  @@index([socialAccountId, capturedAt])
+}

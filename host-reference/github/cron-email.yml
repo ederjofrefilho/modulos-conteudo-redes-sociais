@@ -1,0 +1,129 @@
+name: Cron e-mail e conteúdo (envio agendado + sync IMAP + posts agendados)
+
+# Vercel Hobby só roda cron nativo 1x/dia (usado pelo daily-digest, ver
+# vercel.json) — estas rotas precisam de um agendador externo batendo
+# a cada poucos minutos. GitHub Actions não garante o intervalo exato (fila
+# de runners compartilhados pode atrasar alguns minutos em pico), mas troca
+# o "só quando alguém abre /email" (que podia nunca acontecer) por uma
+# checagem best-effort de ~5 em 5 minutos, sem custo e sem conta externa.
+#
+# publish-scheduled entrou aqui em 24/08/2026: a rota já existia
+# (`posts.publishDueScheduled`) mas nenhum agendador batia nela — agendar um
+# post em /conteudo nunca publicava sozinho.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  send-scheduled:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Envia e-mails agendados vencidos
+        run: |
+          curl -sS -f -X GET "https://app.example.com/api/cron/send-scheduled" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+  imap-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sincroniza caixas de e-mail (IMAP)
+        run: |
+          curl -sS -f -X GET "https://app.example.com/api/cron/imap-sync" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+  publish-scheduled:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publica posts de conteúdo agendados vencidos
+        run: |
+          curl -sS -f -X GET "https://app.example.com/api/cron/publish-scheduled" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+  calendar-reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lembrete de véspera dos compromissos da agenda
+        # 404 = deploy com a agenda (Fase 4) ainda não foi para produção —
+        # não conta como falha até lá; qualquer outro erro conta.
+        run: |
+          code=$(curl -sS -o /tmp/out -w '%{http_code}' -X GET "https://app.example.com/api/cron/calendar-reminders" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat /tmp/out; echo
+          [ "$code" = "404" ] || [ "${code:0:1}" = "2" ]
+
+  publish-social:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publica posts de rede social aprovados e vencidos
+        # 404 = deploy com redes sociais (Etapa 2) ainda não foi para produção —
+        # não conta como falha até lá; qualquer outro erro conta.
+        run: |
+          code=$(curl -sS -o /tmp/out -w '%{http_code}' -X GET "https://app.example.com/api/cron/publish-social" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat /tmp/out; echo
+          [ "$code" = "404" ] || [ "${code:0:1}" = "2" ]
+
+  social-metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recolhe métricas dos posts publicados e seguidores das contas
+        # 404 = deploy com a recolha de métricas ainda não foi para produção.
+        run: |
+          code=$(curl -sS -o /tmp/out -w '%{http_code}' -X GET "https://app.example.com/api/cron/social-metrics"             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat /tmp/out; echo
+          [ "$code" = "404" ] || [ "${code:0:1}" = "2" ]
+
+  jobs-queue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fila de trabalhos com retentativa (e-mails de reunião que falharam)
+        # 404 = deploy com a plataforma de reuniões ainda não foi para produção.
+        run: |
+          code=$(curl -sS -o /tmp/out -w '%{http_code}' -X GET "https://app.example.com/api/cron/jobs" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat /tmp/out; echo
+          [ "$code" = "404" ] || [ "${code:0:1}" = "2" ]
+
+  meetings:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Salas de vídeo (fecha janelas, marca no-show, aplica retenção)
+        # 404 = deploy com a plataforma de reuniões ainda não foi para produção.
+        run: |
+          code=$(curl -sS -o /tmp/out -w '%{http_code}' -X GET "https://app.example.com/api/cron/meetings" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat /tmp/out; echo
+          [ "$code" = "404" ] || [ "${code:0:1}" = "2" ]
+
+  ads-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sincroniza contas de anúncios (campanhas, métricas, leads) e avalia alertas
+        # 404 = deploy com o módulo de anúncios ainda não foi para produção.
+        run: |
+          code=$(curl -sS -o /tmp/out -w '%{http_code}' -X GET "https://app.example.com/api/cron/ads-sync" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat /tmp/out; echo
+          [ "$code" = "404" ] || [ "${code:0:1}" = "2" ]
+
+  ads-optimization:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dados de otimização do Google Ads (palavras-chave, termos, negativas, diagnóstico)
+        # Rota própria: nunca atrasa o ads-sync. Cadência (~6 h por conta) decidida no serviço.
+        run: |
+          code=$(curl -sS -o /tmp/out -w '%{http_code}' -X GET "https://app.example.com/api/cron/ads-optimization" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat /tmp/out; echo
+          [ "$code" = "404" ] || [ "${code:0:1}" = "2" ]
+
+  ads-conversions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Envia conversões ao Google Ads (site com consentimento e negócios ganhos), com retentativa
+        run: |
+          code=$(curl -sS -o /tmp/out -w '%{http_code}' -X GET "https://app.example.com/api/cron/ads-conversions" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat /tmp/out; echo
+          [ "$code" = "404" ] || [ "${code:0:1}" = "2" ]

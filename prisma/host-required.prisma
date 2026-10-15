@@ -1,0 +1,92 @@
+// O MÍNIMO que os módulos esperam encontrar no banco do projeto destino.
+// Não é o schema do sistema original: é a forma reduzida, só com os campos que o
+// código destes módulos (e do core que eles usam) lê ou escreve.
+// Se o projeto destino já tem User/Notification/Event/RateLimit, basta
+// garantir estes campos e acrescentar as relações marcadas no User.
+// Ver docs/05-CONTRATO-COM-O-PROJETO-HOST.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserRole {
+  ADMIN
+  MEMBER
+}
+
+model User {
+  id       String   @id @default(cuid())
+  name     String?
+  email    String   @unique
+  image    String?
+  role     UserRole @default(MEMBER)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  // ---- Relações exigidas pelos módulos de conteúdo e redes sociais ----
+  contentPostsAuthored    ContentPost[]         @relation("ContentAuthor")
+  contentAssetsUploaded   ContentAsset[]        @relation("ContentAssetUploader")
+  socialAccountsConnected SocialAccount[]       @relation("SocialAccountConnector")
+  socialPostsCreated      SocialPost[]          @relation("SocialPostAuthor")
+  socialPostsApproved     SocialPost[]          @relation("SocialPostApprover")
+  socialAccountsOwned     SocialAccount[]       @relation("SocialAccountOwner")
+  socialAccessGranted     SocialAccountAccess[] @relation("SocialAccessUser")
+  socialAccessGivenBy     SocialAccountAccess[] @relation("SocialAccessGrantor")
+  socialPostsSubmitted    SocialPost[]          @relation("SocialPostSubmitter")
+  socialPostsReviewed     SocialPost[]          @relation("SocialPostReviewer")
+  socialPostsScheduled    SocialPost[]          @relation("SocialPostScheduler")
+  socialPostsPublished    SocialPost[]          @relation("SocialPostPublisher")
+
+  notifications Notification[]
+  eventsActed   Event[]        @relation("EventActor")
+}
+
+// Sino de notificações (core/notifications.ts::createNotification).
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String?
+  url       String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+// Registo de eventos append-only (core/events.ts::emit). No sistema original o Event
+// também tem accountId/contactId/dealId ligados a Account/Contact/Deal; estes
+// módulos nunca os preenchem, por isso aqui ficam como texto sem FK.
+model Event {
+  id         String   @id @default(cuid())
+  type       String
+  source     String
+  occurredAt DateTime @default(now())
+  accountId  String?
+  contactId  String?
+  dealId     String?
+  visitorId  String?
+  actorId    String?
+  actor      User?    @relation("EventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  payload    Json     @default("{}")
+  createdAt  DateTime @default(now())
+
+  @@index([type, occurredAt])
+  @@index([occurredAt])
+}
+
+// Limite por IP das rotas de cron (core/rate-limit.ts::assertRateLimit).
+model RateLimit {
+  key         String   @id
+  windowStart DateTime
+  count       Int      @default(1)
+}
